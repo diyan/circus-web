@@ -20,6 +20,9 @@ from circusweb.util import (run_command, render_template, set_message, route,
                             MEDIADIR)
 from circusweb.session import connect_to_circus, disconnect_from_circus
 from circusweb.server import SocketIOServer
+import socket
+import json
+import threading
 
 
 session_opts = {
@@ -31,6 +34,41 @@ session_opts = {
 
 
 app = SessionMiddleware(app(), session_opts)
+
+
+DISCOVERED_ENDPOINTS = []
+
+
+CIRCUS_MULTICAST_ADDR = "237.219.251.97"
+CIRCUS_MULTICAST_PORT = 12027
+
+
+def autodiscovery_thread():
+    ANY = '0.0.0.0'
+    CIRCUS_MULTICAST_ADDR = "237.219.251.97"
+    CIRCUS_MULTICAST_PORT = 12027
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM,
+        socket.IPPROTO_UDP)
+    sock.bind((ANY, 0))
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+
+    sock.sendto(json.dumps(''),
+            (CIRCUS_MULTICAST_ADDR, CIRCUS_MULTICAST_PORT))
+    data, address = sock.recvfrom(1024)
+    data = json.loads(data)
+    endpoint = data.get('endpoint', "")
+    if endpoint.startswith('tcp://'):
+        # In case of multi interface binding i.e: tcp://0.0.0.0:5557
+        endpoint = endpoint.replace('0.0.0.0', address[0])
+        print "Endpoint", endpoint
+
+    DISCOVERED_ENDPOINTS.append(endpoint)
+
+
+discovery_thread = threading.Thread(target=autodiscovery_thread)
+discovery_thread.start()
 
 
 @route('/media/<filename:path>', ensure_client=False)
@@ -101,7 +139,7 @@ def connect():
     POST body.
     """
     def _ask_connection():
-        return render_template('connect.html')
+        return render_template('connect.html', endpoints=DISCOVERED_ENDPOINTS)
 
     if request.method == 'GET':
         return _ask_connection()

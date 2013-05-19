@@ -1,6 +1,8 @@
 import argparse
 import os
 import sys
+from time import time
+from urlparse import urlparse
 
 try:
     from beaker.middleware import SessionMiddleware
@@ -15,7 +17,7 @@ except ImportError, e:
 
 from circusweb.namespace import StatsNamespace
 from circusweb import __version__, logger
-from circus.util import configure_logger, LOG_LEVELS
+from circus.util import configure_logger, LOG_LEVELS, DEFAULT_ENDPOINT_MULTICAST
 from circusweb.util import (run_command, render_template, set_message, route,
                             MEDIADIR)
 from circusweb.session import connect_to_circus, disconnect_from_circus
@@ -39,32 +41,39 @@ app = SessionMiddleware(app(), session_opts)
 DISCOVERED_ENDPOINTS = []
 
 
-CIRCUS_MULTICAST_ADDR = "237.219.251.97"
-CIRCUS_MULTICAST_PORT = 12027
-
-
 def autodiscovery_thread():
-    ANY = '0.0.0.0'
-    CIRCUS_MULTICAST_ADDR = "237.219.251.97"
-    CIRCUS_MULTICAST_PORT = 12027
+    any_addr = '0.0.0.0'
+
+    multicast_addr, multicast_port = urlparse(DEFAULT_ENDPOINT_MULTICAST) \
+        .netloc.split(':')
+    multicast_port = int(multicast_port)
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM,
-        socket.IPPROTO_UDP)
-    sock.bind((ANY, 0))
+                         socket.IPPROTO_UDP)
+    sock.bind((any_addr, 0))
     sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     sock.sendto(json.dumps(''),
-            (CIRCUS_MULTICAST_ADDR, CIRCUS_MULTICAST_PORT))
-    data, address = sock.recvfrom(1024)
-    data = json.loads(data)
-    endpoint = data.get('endpoint', "")
-    if endpoint.startswith('tcp://'):
-        # In case of multi interface binding i.e: tcp://0.0.0.0:5557
-        endpoint = endpoint.replace('0.0.0.0', address[0])
-        print "Endpoint", endpoint
+                (multicast_addr, multicast_port))
 
-    DISCOVERED_ENDPOINTS.append(endpoint)
+    timer = time()
+    while True:
+        data, address = sock.recvfrom(1024)
+        data = json.loads(data)
+        endpoint = data.get('endpoint', "")
+        if endpoint.startswith('tcp://'):
+            # In case of multi interface binding i.e: tcp://0.0.0.0:5557
+            endpoint = endpoint.replace('0.0.0.0', address[0])
+
+        DISCOVERED_ENDPOINTS.append(endpoint)
+
+        if time() - timer > 30 * 60:
+            # Rediscover every 30 seconds
+            del DISCOVERED_ENDPOINTS[:]
+            timer = time()
+            sock.sendto(json.dumps(''),
+                        (multicast_addr, multicast_port))
 
 
 discovery_thread = threading.Thread(target=autodiscovery_thread)

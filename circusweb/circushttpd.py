@@ -1,8 +1,6 @@
 import argparse
 import os
 import sys
-from time import time
-from urlparse import urlparse
 
 try:
     from beaker.middleware import SessionMiddleware
@@ -17,14 +15,11 @@ except ImportError, e:
 
 from circusweb.namespace import StatsNamespace
 from circusweb import __version__, logger
-from circus.util import configure_logger, LOG_LEVELS, DEFAULT_ENDPOINT_MULTICAST
+from circus.util import configure_logger, LOG_LEVELS
 from circusweb.util import (run_command, render_template, set_message, route,
-                            MEDIADIR)
+                            MEDIADIR, AutoDiscoveryThread)
 from circusweb.session import connect_to_circus, disconnect_from_circus
 from circusweb.server import SocketIOServer
-import socket
-import json
-import threading
 
 
 session_opts = {
@@ -36,48 +31,6 @@ session_opts = {
 
 
 app = SessionMiddleware(app(), session_opts)
-
-
-DISCOVERED_ENDPOINTS = []
-
-
-def autodiscovery_thread():
-    any_addr = '0.0.0.0'
-
-    multicast_addr, multicast_port = urlparse(DEFAULT_ENDPOINT_MULTICAST) \
-        .netloc.split(':')
-    multicast_port = int(multicast_port)
-
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM,
-                         socket.IPPROTO_UDP)
-    sock.bind((any_addr, 0))
-    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-    sock.sendto(json.dumps(''),
-                (multicast_addr, multicast_port))
-
-    timer = time()
-    while True:
-        data, address = sock.recvfrom(1024)
-        data = json.loads(data)
-        endpoint = data.get('endpoint', "")
-        if endpoint.startswith('tcp://'):
-            # In case of multi interface binding i.e: tcp://0.0.0.0:5557
-            endpoint = endpoint.replace('0.0.0.0', address[0])
-
-        DISCOVERED_ENDPOINTS.append(endpoint)
-
-        if time() - timer > 30 * 60:
-            # Rediscover every 30 seconds
-            del DISCOVERED_ENDPOINTS[:]
-            timer = time()
-            sock.sendto(json.dumps(''),
-                        (multicast_addr, multicast_port))
-
-
-discovery_thread = threading.Thread(target=autodiscovery_thread)
-discovery_thread.start()
 
 
 @route('/media/<filename:path>', ensure_client=False)
@@ -148,7 +101,8 @@ def connect():
     POST body.
     """
     def _ask_connection():
-        return render_template('connect.html', endpoints=DISCOVERED_ENDPOINTS)
+        return render_template('connect.html',
+                               endpoints=app.discovery_thread.get_endpoints())
 
     if request.method == 'GET':
         return _ask_connection()
@@ -198,6 +152,10 @@ def main():
     parser.add_argument('--log-output', dest='logoutput', default='-',
                         help="log output")
     parser.add_argument('--ssh', default=None, help='SSH Server')
+    parser.add_argument('--multicast', dest="multicast",
+                        default="upd://237.219.251.97:12027",
+                        help="Mutlicast endpoint. If not specified, Circus "
+                             "will use default one")
 
     args = parser.parse_args()
 
@@ -210,6 +168,9 @@ def main():
 
     if args.endpoint is not None:
         connect_to_circus(args.endpoint, args.ssh)
+
+    app.discovery_thread = AutoDiscoveryThread(args.multicast)
+    app.discovery_thread.start()
 
     run(app, host=args.host, port=args.port, server=args.server, fd=args.fd)
 
